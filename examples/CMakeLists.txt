@@ -22,3 +22,4 @@
 #############################################################################################
 add_subdirectory(service)
 add_subdirectory(service_finder)
+add_subdirectory(combined)

@@ -27,14 +27,21 @@
 
 int main (int argc, char* argv[])
 {
+    std::vector<lssdp::NetworkInterface> networks;
+    updateNetworkInterfaces(networks);
+    for(const auto& i: networks) {
+      std::cout << i.getName() << ": " << i.getIp4() << " (" << i.getAddrIp4() << ")\n";
+    }
+
     std::cout << std::string("****************************************************************") << std::endl;
     std::cout << std::string("* Welcome to the lssdp cpp service example                      ") << std::endl;
     std::cout << std::string("* Service will be setup                                         ") << std::endl;
     std::cout << std::string("****************************************************************") << std::endl;
 
+    std::string location_url = "http://" + lssdp::getPrimaryIp4() + ":9002";
     lssdp::Service my_service("http://239.255.255.250:1900", //discovery_url
         std::chrono::seconds(1800), //max_age
-        "http://192.168.1.34:9092", //location_url
+        location_url,
         "service_uid_1", //unique_service_identifier
         "my_search_target", //search_target
         "MyProductName", //product_name

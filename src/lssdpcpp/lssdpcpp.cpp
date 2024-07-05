@@ -66,7 +66,8 @@ std::string getErrorAsString()
 #include <sys/socket.h> // struct sockaddr, AF_INET, SOL_SOCKET, socklen_t, setsockopt, socket, bind, sendto, recvfrom
 #include <netinet/in.h> // struct sockaddr_in, struct ip_mreq, INADDR_ANY, IPPROTO_IP, also include <sys/socket.h>
 #include <arpa/inet.h>  // inet_aton, inet_ntop, inet_addr, also include <netinet/in.h>
-
+#include <ifaddrs.h>
+#include <netdb.h>
 #define SOCKET_TYPE int
 #ifndef _SIZEOF_ADDR_IFREQ
 #define _SIZEOF_ADDR_IFREQ sizeof
@@ -114,7 +115,38 @@ namespace
     //option for receiving from my host
     constexpr bool LSSDP_RECEIVE_PACKETS_FROM_MYSELF = true;
     //option for sending to my host
-    constexpr bool LSSDP_SEND_TO_LOCALHOST = true;
+    constexpr bool LSSDP_SEND_TO_LOCALHOST = false;
+    constexpr bool LSSDP_USE_ONLY_PRIMARY_IP = true;
+
+    bool getPrimaryIpV4(char* buffer, size_t buflen) 
+    {
+      int sock = socket(AF_INET, SOCK_DGRAM, 0);
+      if (sock == -1) return  false;
+
+      constexpr const char* kGoogleDnsIp = "8.8.8.8";
+      constexpr uint16_t kDnsPort = 53;
+      struct sockaddr_in serv;
+      memset(&serv, 0, sizeof(serv));
+      serv.sin_family = AF_INET;
+      serv.sin_addr.s_addr = inet_addr(kGoogleDnsIp);
+      serv.sin_port = htons(kDnsPort);
+
+      bool ret = false;
+      int err = connect(sock, (const sockaddr*) &serv, sizeof(serv));
+      if (err != -1) 
+      {
+        sockaddr_in name;
+        socklen_t namelen = sizeof(name);
+        err = getsockname(sock, (sockaddr*) &name, &namelen);
+        if (err != -1)  
+        {
+          const char* p = inet_ntop(AF_INET, &name.sin_addr, buffer, buflen);
+          ret = p != nullptr;
+        }
+      }
+      close(sock);
+      return ret;
+    }    
 }
 
 //#define LSSDP_DEBUGGING_ON
@@ -134,6 +166,15 @@ namespace
 namespace lssdp
 {
 
+std::string getPrimaryIp4() 
+{
+  std::array<char, NI_MAXHOST> ipv4{0};
+  if (!getPrimaryIpV4(ipv4.data(), ipv4.size())) 
+  {
+    throw std::runtime_error("Can't detect primary IPv4 address");
+  }
+  return ipv4.data();
+}
 /*******************************************************************************************************/
 /* Helper class Initialize the Windows Socket Lib                                                      */
 /*******************************************************************************************************/
@@ -538,6 +579,13 @@ bool updateNetworkInterfaces(std::vector<NetworkInterface>& interfaces)
 
     std::vector<NetworkInterface> new_interfaces;
 
+    std::array<char, 64> public_ipv4{0};
+    if (!getPrimaryIpV4(public_ipv4.data(), public_ipv4.size())) {
+      if (LSSDP_USE_ONLY_PRIMARY_IP) 
+      {
+        throw std::runtime_error("Can't detect primary IPv4 address");
+      }
+    }
 #ifdef WIN32
     #define WORKING_BUFFER_SIZE 15000
     #define MAX_TRIES 3
@@ -597,64 +645,99 @@ bool updateNetworkInterfaces(std::vector<NetworkInterface>& interfaces)
     FREE(p_adaptersinfo);
 
 #else //WIN32
-    /* Reference to this article:
-    * http://stackoverflow.com/a/8007079
-    */
-
-    // in lin create UDP socket
-    SOCKET_TYPE fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) 
-    {
-        throw std::runtime_error(std::string("create socket failed, errno = ") 
+	struct ifaddrs *ifap, *ifa;
+	if (getifaddrs(&ifap) != 0) 
+  {
+     throw std::runtime_error(std::string("cannot call getifaddrs, errno = ") 
                                  + getErrorAsString());
-    }
-#define LOCAL_BUFFER_LEN    2048
-    // get ifconfig
-    char buffer[LOCAL_BUFFER_LEN];
-    struct ifconf ifc;
-    ifc.ifc_len = sizeof(buffer);
-    ifc.ifc_buf = (caddr_t)buffer;
+  }
 
-    if (ioctl(fd, SIOCGIFCONF, &ifc) < 0)
+	for (ifa = ifap; ifa; ifa = ifa->ifa_next) 
+  {
+    if ((ifa->ifa_flags & IFF_UP) == 0) continue;
+    if (ifa->ifa_addr != nullptr && ifa->ifa_addr->sa_family == AF_INET) 
     {
-        throw std::runtime_error(std::string("ioctl SIOCGIFCONF failed, errno = ") 
-                                 + getErrorAsString());
-    }
+      if (ifa->ifa_netmask != nullptr && ifa->ifa_netmask->sa_family == AF_INET) 
+      {
+        struct sockaddr_in *addr = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+        struct sockaddr_in *netmask_addr = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_netmask);
 
-    // set to new interfaces 
-    int i;
-    struct ifreq * ifr;
-    for (i = 0; i < ifc.ifc_len; i += _SIZEOF_ADDR_IFREQ(*ifr))
-    {
-        ifr = (struct ifreq *)(buffer + i);
-        if (ifr->ifr_addr.sa_family != AF_INET) {
-            // only support IPv4
-            continue;
-        }
-
-        // get interface ip address
-        struct sockaddr_in * addr = (struct sockaddr_in *) &ifr->ifr_addr;
-
-        // get network mask
-        struct ifreq netmask = {};
-        strcpy(netmask.ifr_name, ifr->ifr_name);
-        if (ioctl(fd, SIOCGIFNETMASK, &netmask) != 0) 
+        NetworkInterface ni(ifa->ifa_name, addr->sin_addr.s_addr, netmask_addr->sin_addr.s_addr);
+        if (LSSDP_USE_ONLY_PRIMARY_IP) 
         {
+          if (ni.getIp4() != public_ipv4.data()) {
             continue;
+          }
         }
-        struct sockaddr_in * netmask_addr  = (struct sockaddr_in *) &netmask.ifr_addr;
+        new_interfaces.emplace_back(ni);
+        
+      }
+    }
+  } 
+  freeifaddrs(ifap);
+//     /* Reference to this article:
+//     * http://stackoverflow.com/a/8007079
+//     */
 
-        new_interfaces.emplace_back(NetworkInterface(ifr->ifr_name,
-                                                     addr->sin_addr.s_addr,
-                                                     netmask_addr->sin_addr.s_addr));
-    }
+//     // in lin create UDP socket
+//     SOCKET_TYPE fd = socket(AF_INET, SOCK_DGRAM, 0);
+//     if (fd < 0) 
+//     {
+//         throw std::runtime_error(std::string("create socket failed, errno = ") 
+//                                  + getErrorAsString());
+//     }
+// #define LOCAL_BUFFER_LEN    2048
+//     // get ifconfig
+//     char buffer[LOCAL_BUFFER_LEN];
+//     struct ifconf ifc;
+//     ifc.ifc_len = sizeof(buffer);
+//     ifc.ifc_buf = (caddr_t)buffer;
+
+//     if (ioctl(fd, SIOCGIFCONF, &ifc) < 0)
+//     {
+//         throw std::runtime_error(std::string("ioctl SIOCGIFCONF failed, errno = ") 
+//                                  + getErrorAsString());
+//     }
+
+//     // set to new interfaces 
+//     int i;
+//     struct ifreq * ifr;
+//     for (i = 0; i < ifc.ifc_len; i += _SIZEOF_ADDR_IFREQ(*ifr))
+//     {
+//         ifr = (struct ifreq *)(buffer + i);
+//         if (ifr->ifr_addr.sa_family != AF_INET) {
+//             // only support IPv4
+//             continue;
+//         }
+//         // get interface ip address
+//         struct sockaddr_in * addr = (struct sockaddr_in *) &ifr->ifr_addr;
+
+//         // get network mask
+//         struct ifreq netmask = {};
+//         strcpy(netmask.ifr_name, ifr->ifr_name);
+//         if (ioctl(fd, SIOCGIFNETMASK, &netmask) != 0) 
+//         {
+//             continue;
+//         }
+//         struct sockaddr_in * netmask_addr  = (struct sockaddr_in *) &netmask.ifr_addr;
+
+//         NetworkInterface ni(ifr->ifr_name, addr->sin_addr.s_addr, netmask_addr->sin_addr.s_addr);
+//         std::cout << ni.getName() << ": " << ni.getIp4() <<  " - " << public_ipv4.data() << "\n";
+//         if (LSSDP_USE_ONLY_PRIMARY_IP) 
+//         {
+//            if (ni.getIp4() != public_ipv4.data()) {
+//             continue;
+//            }
+//         }
+//         new_interfaces.emplace_back(ni);
+//     }
        
-    // close socket
-    if (fd >= 0 && close(fd) != 0)
-    {
-       throw std::runtime_error(std::string("closing of socket failed, errno = ") 
-                                 + getErrorAsString());
-    }
+//     // close socket
+//     if (fd >= 0 && close(fd) != 0)
+//     {
+//        throw std::runtime_error(std::string("closing of socket failed, errno = ") 
+//                                  + getErrorAsString());
+//     }
 
 #endif //WIN32
     bool is_equal = new_interfaces == interfaces;
@@ -802,7 +885,11 @@ public:
             throw std::runtime_error(throw_msg);
         }
         // set reuse address
+#ifdef __APPLE__        
+        if (setsockopt(_socket, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) != 0)
+#else        
         if (setsockopt(_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0)
+#endif
         {
             std::string throw_msg = std::string("setsockopt SO_REUSEADDR failed, errno = ")
                 + getErrorAsString();
@@ -1199,8 +1286,12 @@ struct Service::Impl : public ServiceDescription
             if ((intf.getAddrIp4() & intf.getAddrNetMaskIp4())
                 == (address_to & intf.getAddrNetMaskIp4()))
             {
+              if (LSSDP_SEND_TO_LOCALHOST || intf.getIp4() != LSSDP_ADDR_LOCALHOST)
+              {
                 found = true;
                 found_address = intf.getIp4();
+              }
+              break;
             }
         }
 

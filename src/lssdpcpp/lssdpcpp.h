@@ -159,6 +159,8 @@ private:
  */
 bool updateNetworkInterfaces(std::vector<NetworkInterface>& interfaces);
 
+std::string getPrimaryIp4();
+
 /**
  * @brief service description class
  *        which may contain all properties of a service
