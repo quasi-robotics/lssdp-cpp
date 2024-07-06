@@ -1013,53 +1013,53 @@ public:
             throw std::runtime_error(throw_msg);
         }
 
-        // 2. bind socket
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = address;
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-        {
-            std::string throw_msg = std::string("bind to address ")
-                                    + inet_ntoa(addr.sin_addr)
-                                    + std::string(" failed, errno =  ")
-                                    + getErrorAsString();
-            closeSocket(&fd);
-            throw std::runtime_error(throw_msg);
-        }
+        // // 2. bind socket
+        // struct sockaddr_in addr;
+        // memset(&addr, 0, sizeof(addr));
+        // addr.sin_family = AF_INET;
+        // addr.sin_addr.s_addr = address;
+        // if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        // {
+        //     std::string throw_msg = std::string("bind to address ")
+        //                             + inet_ntoa(addr.sin_addr)
+        //                             + std::string(" failed, errno =  ")
+        //                             + getErrorAsString();
+        //     closeSocket(&fd);
+        //     throw std::runtime_error(throw_msg);
+        // }
 
-        // 3. enable IP_MULTICAST_LOOP for us, because we want that if the 
-        //    option "send to myself is set"
-        if (LSSDP_SEND_TO_LOCALHOST)
-        {
-            int opt = 1;
-#ifdef WIN32
-            const char* value_to_set = (const char*)&opt;
-#else
-            int* value_to_set = &opt;
-#endif
+//         // 3. enable IP_MULTICAST_LOOP for us, because we want that if the 
+//         //    option "send to myself is set"
+//         if (LSSDP_SEND_TO_LOCALHOST)
+//         {
+//             int opt = 1;
+// #ifdef WIN32
+//             const char* value_to_set = (const char*)&opt;
+// #else
+//             int* value_to_set = &opt;
+// #endif
 
-            if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, value_to_set, sizeof(opt)) != 0)
-            {
-                std::string throw_msg = std::string("setsockopt IP_MULTICAST_LOOP failed, errno = ")
-                    + getErrorAsString();
-                closeSocket(&fd);
-                throw std::runtime_error(throw_msg);
-            }
-        }
+//             if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, value_to_set, sizeof(opt)) != 0)
+//             {
+//                 std::string throw_msg = std::string("setsockopt IP_MULTICAST_LOOP failed, errno = ")
+//                     + getErrorAsString();
+//                 closeSocket(&fd);
+//                 throw std::runtime_error(throw_msg);
+//             }
+//         }
 
         // 4. set destination address
         struct sockaddr_in dest_addr;
         memset(&dest_addr, 0, sizeof(dest_addr));
         dest_addr.sin_family = AF_INET;
         dest_addr.sin_port = htons(port);
-        dest_addr.sin_addr.s_addr = _multicast_socket_addr;
+        dest_addr.sin_addr.s_addr = address;//_multicast_socket_addr;
         
         // 5. send data
         int send_data_size = sendto(fd, data, (int)data_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         if (send_data_size < 0)
         {
-            std::string throw_msg = std::string("sendto ") + inet_ntoa(addr.sin_addr) + ":" + std::to_string(port) 
+            std::string throw_msg = std::string("sendto ") + inet_ntoa(dest_addr.sin_addr) + ":" + std::to_string(port) 
                 + " for multicast address "+ inet_ntoa(dest_addr.sin_addr) + ":" + std::to_string(port)
                 + " failed, errno = "
                 + getErrorAsString();
